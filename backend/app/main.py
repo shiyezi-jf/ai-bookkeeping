@@ -1,13 +1,18 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select
 
+from app.config import settings
 from app.db import SessionLocal, engine
-from app.models import Base, Category
+from app.models import Base, Category, Budget
 
-from app.routers import transactions
+from app.routers import transactions, stats
 from app.routers import parse
+
+from datetime import date
+from decimal import Decimal
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -32,12 +37,33 @@ async def lifespan(app: FastAPI):
             ])
             await session.commit()
 
+        current_month = date.today().strftime("%Y-%m")
+        exists = await session.scalar(
+            select(Budget).where(
+                Budget.month == current_month,
+                Budget.category_id.is_(None),
+            )
+        )
+        if exists is None:
+            session.add(Budget(month=current_month, amount=Decimal("3000.00")))
+            await session.commit()
+
     yield
 
 app = FastAPI(title="AI 一句话记账 API", lifespan=lifespan)
 
+# 本地开发走 Vite proxy 用不到 CORS；线上前后端不同域，必须按来源放行
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origin_list,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.include_router(transactions.router)
 app.include_router(parse.router)
+app.include_router(stats.router)
 
 @app.get("/api/ping")
 async def ping() -> dict[str, str]:

@@ -1,14 +1,22 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   createTransaction,
+  deleteTransaction,
+  getCategories,
+  getMonthlyStats,
   listTransactions,
   parseText,
+  updateTransaction,
+  type Category,
   type CategoryName,
+  type MonthlyStats,
   type Transaction,
   type TransactionCreate,
   type TransactionDraft,
 } from '../api'
+import StatsCharts from '../components/StatsCharts.vue'
 
 const CATEGORIES: CategoryName[] = [
   '餐饮',
@@ -42,6 +50,32 @@ const list = ref<Transaction[]>([])
 const listLoading = ref(false)
 const listError = ref('')
 
+// ---- 分页与筛选 ----
+const page = ref(1)
+const size = ref(10)
+/** null = 不筛选月份；有值 = 'YYYY-MM' */
+const month = ref<string | null>(null)
+const total = ref(0)
+
+// ---- 统计 ----
+const stats = ref<MonthlyStats | null>(null)
+const statsLoading = ref(false)
+const statsError = ref('')
+/** 分类字典，饼图配色来自这里 */
+const categories = ref<Category[]>([])
+
+// ---- 编辑弹窗 ----
+const editVisible = ref(false)
+const editSaving = ref(false)
+const editError = ref('')
+const editId = ref<number | null>(null)
+const editForm = ref({
+  amount: '',
+  category: '' as CategoryName | '',
+  occurred_on: '',
+  note: '',
+})
+
 /** 本地日期 YYYY-MM-DD。不能用 toISOString()：那是 UTC，东八区早上 8 点前会拿到昨天 */
 function todayStr(): string {
   const d = new Date()
@@ -72,6 +106,30 @@ const submitHint = computed(() => {
   if (form.value.amount === '' || Number(form.value.amount) <= 0) return '请先填写金额'
   if (form.value.category === '') return '请先选择分类'
   if (form.value.occurred_on === '') return '请先选择日期'
+  return ''
+})
+
+/** 编辑弹窗的校验规则与 D4 确认卡片保持一致：金额 > 0、分类必选、日期必选 */
+const canSaveEdit = computed(() => {
+  const amount = Number(editForm.value.amount)
+  return (
+    editForm.value.amount !== '' &&
+    Number.isFinite(amount) &&
+    amount > 0 &&
+    editForm.value.category !== '' &&
+    editForm.value.occurred_on !== '' &&
+    !editSaving.value
+  )
+})
+
+const editHint = computed(() => {
+  if (editSaving.value) return '保存中…'
+  const amount = Number(editForm.value.amount)
+  if (editForm.value.amount === '' || !Number.isFinite(amount) || amount <= 0) {
+    return '金额必须大于 0'
+  }
+  if (editForm.value.category === '') return '请选择分类'
+  if (editForm.value.occurred_on === '') return '请选择日期'
   return ''
 })
 
@@ -107,11 +165,123 @@ async function fetchList() {
   listLoading.value = true
   listError.value = ''
   try {
-    list.value = await listTransactions()
+    const res = await listTransactions({
+      page: page.value,
+      size: size.value,
+      month: month.value,
+    })
+    list.value = res.items
+    total.value = res.total
+    // 以服务端返回的页码为准：万一本地页码越界，这里能自动纠正
+    page.value = res.page
+    size.value = res.size
   } catch (e) {
     listError.value = e instanceof Error ? e.message : '列表加载失败'
   } finally {
     listLoading.value = false
+  }
+}
+
+/** 拉月度统计。month 为 null 时不传，由后端默认当前自然月 */
+async function fetchStats() {
+  statsLoading.value = true
+  statsError.value = ''
+  try {
+    stats.value = await getMonthlyStats(month.value)
+  } catch (e) {
+    statsError.value = e instanceof Error ? e.message : '统计加载失败'
+  } finally {
+    statsLoading.value = false
+  }
+}
+
+/**
+ * 列表与统计一起刷新，互不阻塞。
+ * 所有写操作和月份切换都走这里——统计必须跟着数据走，
+ * 绝不能在前端拿旧数组自己加减（分页下本地只有 10 条，算出来一定是错的）。
+ */
+async function refreshAll() {
+  await Promise.all([fetchList(), fetchStats()])
+}
+
+/** 切月份必须回到第 1 页，否则会停在"第 3 页"却只有 1 页数据 */
+function handleMonthChange() {
+  page.value = 1
+  refreshAll()
+}
+
+/** 改每页条数只影响列表分页，统计是按月聚合的，不受 page/size 影响 */
+function handleSizeChange() {
+  page.value = 1
+  fetchList()
+}
+
+function openEdit(row: Transaction) {
+  editId.value = row.id
+  editForm.value = {
+    amount: row.amount,
+    category: row.category as CategoryName,
+    occurred_on: row.occurred_on,
+    note: row.note ?? '',
+  }
+  editError.value = ''
+  editVisible.value = true
+}
+
+async function handleEditSave() {
+  if (!canSaveEdit.value || editId.value === null) return
+
+  editSaving.value = true
+  editError.value = ''
+
+  try {
+    const note = editForm.value.note.trim()
+
+    await updateTransaction(editId.value, {
+      amount: editForm.value.amount, // 原样字符串，全程不碰 float
+      category: editForm.value.category as CategoryName,
+      occurred_on: editForm.value.occurred_on,
+      note: note === '' ? null : note,
+    })
+
+    editVisible.value = false
+    await refreshAll() // 写操作一律以服务端为准，不手动改本地数组
+    ElMessage.success('已保存')
+  } catch (e) {
+    // 失败时弹窗不关闭，用户填的内容必须留着
+    editError.value = e instanceof Error ? e.message : '保存失败，请重试'
+  } finally {
+    editSaving.value = false
+  }
+}
+
+async function handleDelete(row: Transaction) {
+  try {
+    await ElMessageBox.confirm(
+      `确定删除 ${row.occurred_on} 的这笔 ¥${row.amount} 吗？删除后不可恢复。`,
+      '删除确认',
+      {
+        type: 'warning',
+        confirmButtonText: '删除',
+        cancelButtonText: '取消',
+      },
+    )
+  } catch {
+    return // 用户点了取消，什么都不做
+  }
+
+  try {
+    await deleteTransaction(row.id)
+
+    // 空页处理：删掉的是本页最后一条，且当前不在第 1 页，就先退一页
+    if (list.value.length === 1 && page.value > 1) {
+      page.value -= 1
+    }
+
+    await refreshAll()
+    ElMessage.success('已删除')
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '删除失败，请重试')
   }
 }
 
@@ -141,7 +311,9 @@ async function handleSubmit() {
     fallback.value = false
     text.value = ''
 
-    await fetchList()
+    // 新记录日期通常是今天，按倒序会排在第 1 页；不回第 1 页用户会以为没存上
+    page.value = 1
+    await refreshAll()
   } catch (e) {
     submitError.value = e instanceof Error ? e.message : '保存失败，请重试'
   } finally {
@@ -163,7 +335,18 @@ function onAmountInput(e: Event) {
   form.value.amount = (e.target as HTMLInputElement).value
 }
 
-onMounted(fetchList)
+/** 首次进入：先拿分类配色，再并行拉列表和统计 */
+async function init() {
+  try {
+    categories.value = await getCategories()
+  } catch {
+    // 配色拿不到不影响主流程，饼图会退到统一兜底色
+    categories.value = []
+  }
+  await refreshAll()
+}
+
+onMounted(init)
 </script>
 
 <template>
@@ -172,6 +355,22 @@ onMounted(fetchList)
       <h1>AI 一句话记账</h1>
       <p class="hint">用大白话描述这笔消费，比如「昨天打车 25 块」</p>
     </header>
+
+    <!-- 预算提示：没有预算记录时整块不渲染 -->
+    <section
+      v-if="stats?.budget"
+      class="budget"
+      :class="{ exceeded: stats.budget.exceeded }"
+      role="status"
+    >
+      <span class="dot" aria-hidden="true" />
+      <span v-if="stats.budget.exceeded">
+        本月预算 ¥{{ stats.budget.amount }}，已支出 ¥{{ stats.budget.spent }}，已超支
+      </span>
+      <span v-else>
+        本月预算 ¥{{ stats.budget.amount }}，已支出 ¥{{ stats.budget.spent }}
+      </span>
+    </section>
 
     <!-- ① 输入区 -->
     <section class="card">
@@ -257,21 +456,122 @@ onMounted(fetchList)
 
     <!-- ③ 列表 -->
     <section class="card">
-      <h2>账单</h2>
+      <div class="list-head">
+        <h2>账单</h2>
 
-      <p v-if="listLoading" class="muted">加载中…</p>
-      <p v-else-if="listError" class="error" role="alert">{{ listError }}</p>
-      <p v-else-if="list.length === 0" class="muted">还没有记录，试着在上面记一笔吧</p>
+        <el-date-picker
+          v-model="month"
+          type="month"
+          value-format="YYYY-MM"
+          placeholder="全部月份"
+          :editable="false"
+          clearable
+          @change="handleMonthChange"
+        />
+      </div>
 
-      <ul v-else class="list">
-        <li v-for="item in list" :key="item.id">
-          <span class="date">{{ item.occurred_on }}</span>
-          <span class="cat">{{ item.category }}</span>
-          <span class="note">{{ item.note ?? '—' }}</span>
-          <span class="amt">¥{{ item.amount }}</span>
-        </li>
-      </ul>
+      <p v-if="listError" class="error" role="alert">{{ listError }}</p>
+
+      <el-table
+        v-loading="listLoading"
+        :data="list"
+        empty-text="还没有记录，试着在上面记一笔吧"
+        style="width: 100%"
+      >
+        <el-table-column prop="occurred_on" label="日期" width="118" />
+        <el-table-column prop="category" label="分类" width="88" />
+        <el-table-column label="备注" min-width="160" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.note ?? '—' }}</template>
+        </el-table-column>
+        <el-table-column label="金额" width="120" align="right">
+          <template #default="{ row }">
+            <span class="amt">¥{{ row.amount }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="128" align="right">
+          <template #default="{ row }">
+            <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
+            <el-button link type="danger" @click="handleDelete(row)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <div v-if="total > 0" class="pager">
+        <el-pagination
+          v-model:current-page="page"
+          v-model:page-size="size"
+          :total="total"
+          :page-sizes="[10, 20, 50]"
+          layout="total, sizes, prev, pager, next"
+          background
+          @current-change="fetchList"
+          @size-change="handleSizeChange"
+        />
+      </div>
     </section>
+
+    <!-- ⑤ 统计图表：跟随上面的月份筛选 -->
+    <p v-if="statsError" class="error" role="alert">{{ statsError }}</p>
+    <StatsCharts
+      v-if="!statsLoading || stats"
+      :stats="stats"
+      :categories="categories"
+    />
+    <p v-else class="muted">统计加载中…</p>
+
+    <!-- ④ 编辑弹窗 -->
+    <el-dialog
+      v-model="editVisible"
+      title="编辑账单"
+      width="420px"
+      :close-on-click-modal="false"
+    >
+      <div class="form">
+        <label class="field">
+          <span>金额</span>
+          <el-input v-model="editForm.amount" inputmode="decimal" placeholder="0.00" />
+        </label>
+
+        <label class="field">
+          <span>分类</span>
+          <el-select v-model="editForm.category" placeholder="请选择">
+            <el-option v-for="c in CATEGORIES" :key="c" :label="c" :value="c" />
+          </el-select>
+        </label>
+
+        <label class="field">
+          <span>日期</span>
+          <el-date-picker
+            v-model="editForm.occurred_on"
+            type="date"
+            value-format="YYYY-MM-DD"
+            placeholder="选择日期"
+          />
+        </label>
+
+        <label class="field">
+          <span>备注</span>
+          <el-input v-model="editForm.note" maxlength="200" placeholder="选填" />
+        </label>
+      </div>
+
+      <p v-if="editError" class="error" role="alert">{{ editError }}</p>
+
+      <template #footer>
+        <div class="dialog-footer">
+          <span v-if="!canSaveEdit" class="reason">{{ editHint }}</span>
+          <el-button @click="editVisible = false">取消</el-button>
+          <el-button
+            type="primary"
+            :loading="editSaving"
+            :disabled="!canSaveEdit"
+            @click="handleEditSave"
+          >
+            保存
+          </el-button>
+        </div>
+      </template>
+    </el-dialog>
   </main>
 </template>
 
@@ -382,6 +682,39 @@ button:disabled {
   }
 }
 
+.budget {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-left: 3px solid #9ca3af;
+  border-radius: 8px;
+  background: #f9fafb;
+  font-size: 14px;
+  color: #4b5563;
+}
+
+.budget .dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #9ca3af;
+}
+
+/* 超支用语义红，不用主题蓝 */
+.budget.exceeded {
+  border-color: #fecaca;
+  border-left-color: #dc2626;
+  background: #fef2f2;
+  color: #dc2626;
+}
+
+.budget.exceeded .dot {
+  background: #dc2626;
+}
+
 .error {
   margin: 0;
   padding: 8px 12px;
@@ -436,6 +769,14 @@ button:disabled {
   color: var(--text-h);
 }
 
+/* Element Plus 组件的根节点不会命中上面的原生选择器，单独让它们撑满剩余宽度 */
+.field :deep(.el-input),
+.field :deep(.el-select),
+.field :deep(.el-date-editor) {
+  flex: 1;
+  min-width: 0;
+}
+
 .field.readonly strong {
   font-size: 15px;
   font-weight: 500;
@@ -453,49 +794,26 @@ button:disabled {
   color: #9ca3af;
 }
 
-.list {
-  display: flex;
-  flex-direction: column;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.list li {
+.list-head {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 12px;
-  padding: 10px 0;
-  border-top: 1px solid var(--border);
-  font-size: 15px;
 }
 
-.list li:first-child {
-  border-top: none;
+.pager {
+  display: flex;
+  justify-content: flex-end;
 }
 
-.date {
-  flex: 0 0 96px;
-  color: #9ca3af;
-  font-variant-numeric: tabular-nums;
-}
-
-.cat {
-  flex: 0 0 56px;
-  color: var(--text-h);
-}
-
-.note {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.dialog-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
 }
 
 .amt {
-  flex: 0 0 auto;
   font-weight: 500;
   color: var(--text-h);
   font-variant-numeric: tabular-nums;

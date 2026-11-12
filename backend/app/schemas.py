@@ -2,7 +2,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
 CategoryName = Literal["餐饮", "交通", "购物", "居住", "娱乐", "医疗", "学习", "其他"]
 
@@ -67,8 +67,75 @@ class ParseResponse(BaseModel):
     message: str | None = None
 
 class TransactionsPage(BaseModel):
-
+    # 这一页的实际数据
     items: list[TransactionRead]
+    # 符合筛选条件的总条数
     total: int 
+    # 第几页
     page: int 
+    # 每页几条
     size: int 
+
+class TransactionUpdate(BaseModel):
+    """编辑账单：所有字段都可选，只传要改的"""
+
+    amount: Decimal | None = Field(default=None, gt=0, max_digits=10, decimal_places=2)
+    category: CategoryName | None = None
+    occurred_on: date | None = None
+    note: str | None = Field(default=None, max_length=200)
+
+
+class CategoryRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    icon: str | None
+    color: str | None
+
+
+# ---- D6 统计相关 ----
+
+
+class CategoryStat(BaseModel):
+    """饼图的一瓣：某个分类在所选月份里的合计"""
+
+    category: str
+    amount: Decimal
+    count: int
+
+    @field_serializer("amount")
+    def _amount_2dp(self, v: Decimal) -> str:
+        # 统一输出两位小数字符串，前端拿到就能直接显示，不用再补零
+        return f"{v:.2f}"
+
+
+class MonthStat(BaseModel):
+    """折线图上的一个点：某个月的合计。无数据的月份由后端补 0"""
+
+    month: str  # YYYY-MM
+    amount: Decimal
+
+    @field_serializer("amount")
+    def _amount_2dp(self, v: Decimal) -> str:
+        return f"{v:.2f}"
+
+
+class BudgetStat(BaseModel):
+    """所选月份的总预算与已花金额"""
+
+    amount: Decimal
+    spent: Decimal
+    exceeded: bool
+
+    @field_serializer("amount", "spent")
+    def _amount_2dp(self, v: Decimal) -> str:
+        return f"{v:.2f}"
+
+
+class MonthlyStats(BaseModel):
+    month: str
+    summary: list[CategoryStat]
+    trend: list[MonthStat]
+    # 该月没有预算记录时为 None，前端据此不展示提示
+    budget: BudgetStat | None

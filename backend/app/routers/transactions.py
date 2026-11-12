@@ -5,7 +5,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_db
 from app.models import Transaction
-from app.schemas import TransactionCreate, TransactionRead, TransactionsPage
+from app.schemas import TransactionCreate, TransactionRead, TransactionsPage, TransactionUpdate
+from app.periods import month_range
 
 from datetime import date
 
@@ -14,23 +15,7 @@ from datetime import date
 
 router = APIRouter(prefix="/api/transactions", tags=["transactions"])
 
-# 工具函数
-def month_range(month: str) -> tuple[date, date]:
 
-    try:
-        years_s, mons_s = month.split("-")
-        year = int(years_s)
-        mon = int(mons_s)
-
-        start = date(year, mon, 1)
-
-        if mon == 12:
-            end = date(year + 1, 1, 1)
-        else:
-            end = date(year, mon + 1, 1)
-        return start, end
-    except (ValueError, TypeError):
-        raise HTTPException(status_code=400, detail="month 格式必须为 YYYY-MM")
 
 @router.post("", response_model=TransactionRead, status_code=status.HTTP_201_CREATED)
 async def create_transaction(
@@ -95,11 +80,37 @@ async def list_transactions(
     )
 
 # 部分更新
-#@router.patch("/{id}")
-#async def put_list_transactions()
+@router.patch("/{id}", response_model=TransactionRead)
+async def update_transactions(
+    id: int,
+    payload: TransactionUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    # 1. 找出来
+    tx = await db.get(Transaction, id)
+    if tx is None:
+        raise HTTPException(status_code=404, detail="账单不存在")
+    
+    # 2. 只改传了的字段
+    changes = payload.model_dump(exclude_unset=True)
+    for field, value in changes.items():
+        setattr(tx, field, value)
+    
+    await db.commit()
+    return tx
 
 
 
 # 删除功能
-# @router.delete("/{id}")
-# astnc def
+@router.delete("/{id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_transaction(
+    id: int,
+    db: AsyncSession = Depends(get_db)
+):
+    tx = await db.get(Transaction, id)
+    if tx is None:
+        raise HTTPException(status_code=404, detail="账单不存在")
+
+    await db.delete(tx)
+    await db.commit()
+    
