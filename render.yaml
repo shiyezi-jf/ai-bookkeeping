@@ -2,26 +2,18 @@ services:
   - type: web
     name: ai-bookkeeping-api
     runtime: python
-    # 持久磁盘只对付费实例开放；换成 free 实例必须删掉 disk 段
-    plan: starter
+    plan: free
     rootDir: backend
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/ping
-    disk:
-      name: sqlite-data
-      mountPath: /var/data
-      sizeGB: 1
     envVars:
       - key: PYTHON_VERSION
         value: "3.11.10"
-      # 数据库落在持久磁盘上，重新部署不会丢数据
       - key: DATABASE_URL
-        value: sqlite+aiosqlite:////var/data/app.db
-      # 首次创建服务时在控制台填写：https://你的前端域名,http://localhost:5173
+        value: sqlite+aiosqlite:///./app.db
       - key: CORS_ORIGINS
         sync: false
-      # 大模型密钥不写进仓库，创建服务时手填
       - key: LLM_API_KEY
         sync: false
       - key: LLM_BASE_URL
