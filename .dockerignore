@@ -1,0 +1,19 @@
+# 构建镜像时不要带进去的东西（不然镜像会大到构建超时）
+.git
+.gitignore
+.gitattributes
+.workbuddy-ai
+.screenshots
+docs
+deploy
+
+# 前端
+**/node_modules
+frontend/dist
+
+# 后端
+backend/.venv
+backend/app.db
+backend/.env
+**/__pycache__
+**/*.pyc

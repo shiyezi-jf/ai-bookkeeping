@@ -1,7 +1,9 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 
 from app.config import settings
@@ -68,3 +70,9 @@ app.include_router(stats.router)
 @app.get("/api/ping")
 async def ping() -> dict[str, str]:
     return {"message": "pong"}
+
+# 前端构建产物（只在容器镜像里存在 frontend_dist 这个目录时生效）。
+# 本地开发走 Vite、线上走 nginx，都不会触发，所以留着不影响任何现有用法。
+_dist_dir = Path(__file__).resolve().parent.parent / "frontend_dist"
+if _dist_dir.is_dir():
+    app.mount("/", StaticFiles(directory=_dist_dir, html=True), name="spa")
