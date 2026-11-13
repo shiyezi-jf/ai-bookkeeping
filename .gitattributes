@@ -1,0 +1,12 @@
+# 统一换行符：shell 脚本必须是 LF，否则在 Linux 服务器上会报
+# "bad interpreter: /usr/bin/env bash^M" 这种莫名其妙的错
+*.sh text eol=lf
+
+# 其余文本文件也统一 LF，避免 Windows/Linux 来回提交产生噪音
+*.py text eol=lf
+*.ts text eol=lf
+*.vue text eol=lf
+*.md text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
